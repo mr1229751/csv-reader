@@ -228,8 +228,10 @@ export function run(input) {
       }
       const segStr = text.slice(seg, q);
       // A stretch holding a line break is walked a character at a time: an LF would sit at
-      // or before lineLim (the line's first), and a CR is looked for on the slice itself.
-      if (q >= lineLim || segStr.indexOf('\r') !== -1) {
+      // or before lineLim (the line's first), and a CR is looked for on the slice itself —
+      // unless the field closes on a line already known to hold no CR, which covers the
+      // stretch too.
+      if (q >= lineLim || (lineHasCr && segStr.indexOf('\r') !== -1)) {
         return readQuotedSlow(open, openLine);
       }
       if (text.charCodeAt(q + 1) === 34) { // a doubled quote: one quote of the field
@@ -241,6 +243,30 @@ export function run(input) {
       }
       pos = q + 1;
       const value = parts === null ? segStr : (parts.push(segStr), parts.join(''));
+      // The field ends here, at a comma, a line break or the end of the text (afterClose
+      // remains for what follows the quote, appended as it stands).
+      if (pos >= len) {
+        fEnded = END;
+        return value;
+      }
+      const c = text.charCodeAt(pos);
+      if (c === 44) {
+        pos += 1;
+        fEnded = COMMA;
+        return value;
+      }
+      if (c === 10) {
+        pos += 1;
+        line += 1;
+        fEnded = LINE_BREAK;
+        return value;
+      }
+      if (c === 13 && text.charCodeAt(pos + 1) === 10) {
+        pos += 2;
+        line += 1;
+        fEnded = LINE_BREAK;
+        return value;
+      }
       return afterClose(value);
     }
   }
@@ -273,8 +299,40 @@ export function run(input) {
       if (pos > lineLim) syncLine(); // a quoted field spanned lines: find the line we are on
       if (text.charCodeAt(pos) === 34) {
         quoted = true;
-        fields.push(readQuoted());
-        ended = fEnded;
+        // The common quoted field inlined: it closes at the next quote, on this line, with
+        // no doubled quote and nothing to rewrite — its content is one clean slice.
+        const q = text.indexOf('"', pos + 1);
+        if (q !== -1 && q < lineLim && !lineHasCr && text.charCodeAt(q + 1) !== 34) {
+          const value = text.slice(pos + 1, q);
+          pos = q + 1;
+          if (pos >= len) {
+            fields.push(value);
+            ended = END;
+          } else {
+            const c = text.charCodeAt(pos);
+            if (c === 44) {
+              pos += 1;
+              fields.push(value);
+              ended = COMMA;
+            } else if (c === 10) {
+              pos += 1;
+              line += 1;
+              fields.push(value);
+              ended = LINE_BREAK;
+            } else if (c === 13 && text.charCodeAt(pos + 1) === 10) {
+              pos += 2;
+              line += 1;
+              fields.push(value);
+              ended = LINE_BREAK;
+            } else {
+              fields.push(afterClose(value));
+              ended = fEnded;
+            }
+          }
+        } else {
+          fields.push(readQuoted());
+          ended = fEnded;
+        }
       } else {
         quoted = false;
         if (lineHasCr) {
