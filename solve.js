@@ -19,6 +19,13 @@ const COMMA = 0;
 const LINE_BREAK = 1;
 const END = 2;
 
+// What an unquoted scan stops for, by char code: 1 = LF, 2 = CR, 3 = comma; every other
+// code (and every code past the table) is an ordinary character of the field.
+const SPECIAL = new Uint8Array(64);
+SPECIAL[10] = 1;
+SPECIAL[13] = 2;
+SPECIAL[44] = 3;
+
 export function run(input) {
   const text = String(input.text);
   const header = input.header === true;
@@ -39,6 +46,9 @@ export function run(input) {
   // How the last field a helper read ended, and how many characters it kept (for quote_junk).
   let fEnded = END;
   let fAdded = 0;
+  // The first LF at or after the record being read started (its index, or -1 when the rest
+  // of the text holds none): a quoted field that closes before it holds no line break.
+  let recNl = -1;
 
   // Reads unquoted characters onto `value` up to the next comma or line break, csv-reader's
   // readUnquoted: a CR not followed by LF is dropped (stray_cr). Used off the hot path: for
@@ -186,6 +196,8 @@ export function run(input) {
       parts.push(text.slice(seg, pos - 1));
       value = parts.join('');
     }
+    // The field may have spanned lines: the record's first LF is found afresh from here.
+    recNl = text.indexOf('\n', pos);
     return afterClose(value);
   }
 
@@ -208,7 +220,9 @@ export function run(input) {
         return scanTail('"');
       }
       const segStr = text.slice(seg, q);
-      if (segStr.indexOf('\r') !== -1 || segStr.indexOf('\n') !== -1) {
+      // A stretch holding a line break is walked a character at a time: an LF would sit at
+      // or before recNl (the record's first), and a CR is looked for on the slice itself.
+      if ((recNl !== -1 && q >= recNl) || segStr.indexOf('\r') !== -1) {
         return readQuotedSlow(open, openLine);
       }
       if (text.charCodeAt(q + 1) === 34) { // a doubled quote: one quote of the field
@@ -272,6 +286,7 @@ export function run(input) {
     }
 
     // General path: field by field.
+    recNl = nl;
     const fields = [];
     let quoted = false;
     let ended = END;
@@ -289,35 +304,37 @@ export function run(input) {
         let fEnd = pos;
         while (pos < len) {
           const fc = text.charCodeAt(pos);
-          if (fc === 44) { // ,
+          const sp = SPECIAL[fc];
+          if (sp === undefined || sp === 0) {
+            pos += 1;
+            continue;
+          }
+          if (sp === 3) { // ,
             fEnd = pos;
             pos += 1;
             ended = COMMA;
             break;
           }
-          if (fc === 10) { // LF
+          if (sp === 1) { // LF
             fEnd = pos;
             pos += 1;
             line += 1;
             ended = LINE_BREAK;
             break;
           }
-          if (fc === 13) { // CR
-            if (text.charCodeAt(pos + 1) === 10) {
-              fEnd = pos;
-              pos += 2;
-              line += 1;
-              ended = LINE_BREAK;
-              break;
-            }
-            errors.push({ code: 'stray_cr', line: recordLine, row: recordRow });
-            if (parts === null) parts = [];
-            parts.push(text.slice(seg, pos));
-            pos += 1;
-            seg = pos;
-            continue;
+          // CR
+          if (text.charCodeAt(pos + 1) === 10) {
+            fEnd = pos;
+            pos += 2;
+            line += 1;
+            ended = LINE_BREAK;
+            break;
           }
+          errors.push({ code: 'stray_cr', line: recordLine, row: recordRow });
+          if (parts === null) parts = [];
+          parts.push(text.slice(seg, pos));
           pos += 1;
+          seg = pos;
         }
         if (ended === END) fEnd = pos;
         if (parts === null) {
